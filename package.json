@@ -1,0 +1,33 @@
+{
+  "name": "music-inbox",
+  "version": "0.1.0",
+  "description": "Ingest incoming MP3 archives into a music library",
+  "type": "module",
+  "bin": {
+    "music-inbox": "dist/cli.js"
+  },
+  "main": "dist/cli.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "music-metadata": "^11.15.0",
+    "yauzl": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/yauzl": "^3.4.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
