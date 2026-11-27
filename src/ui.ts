@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { styleText } from 'node:util';
-import { columnNames, trackCells } from './review.js';
+import { editableCells, editableColumns } from './review.js';
 import { prompt } from './session.js';
 import type { TrackMeta } from './types.js';
 
@@ -44,10 +44,7 @@ function renderTable(rows: readonly string[][]): string[] {
 }
 
 export function printTracks(tracks: readonly TrackMeta[], hasDisc: boolean): void {
-  // The source path is the matching key for edits, not something worth the
-  // screen space here.
-  const names = columnNames(hasDisc).slice(1);
-  const rows = [names, ...tracks.map((t) => trackCells(t, hasDisc).slice(1))];
+  const rows = [editableColumns(hasDisc), ...tracks.map((t) => editableCells(t, hasDisc))];
   const [head, ...body] = renderTable(rows);
   console.log(bold(head ?? ''));
   for (const line of body) console.log(line);

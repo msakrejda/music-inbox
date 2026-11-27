@@ -3,7 +3,8 @@ import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { executeOps, findExisting, withTempDir } from './apply.js';
+import { executeOps, findExisting } from './apply.js';
+import { withTempDir } from './cleanup.js';
 import { readTracks } from './metadata.js';
 import { buildOps, commonRoot, findCollisions, isMultiDisc } from './paths.js';
 import { reviewInEditor } from './review.js';
@@ -37,7 +38,7 @@ interface Options {
 
 async function processArchive(archive: string, opts: Options): Promise<ArchiveResult> {
   const name = path.basename(archive);
-  return withTempDir(async (temp) => {
+  return withTempDir('music-inbox-', async (temp) => {
     const entries = await extract(archive, temp);
     if (entries === null) {
       return { archive, status: 'failed', created: [], reason: 'could not read the archive' };

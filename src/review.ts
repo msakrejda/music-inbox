@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
+import { deferInterrupts, interrupt, withTempDir } from './cleanup.js';
 import { withStdinReleased } from './session.js';
 import type { TrackMeta } from './types.js';
 
@@ -12,18 +12,30 @@ export interface ParseResult {
   errors: string[];
 }
 
-export function columnNames(hasDisc: boolean): string[] {
+/** The columns a user may change, in display order. */
+export function editableColumns(hasDisc: boolean): string[] {
   return hasDisc
-    ? ['SourceFile', 'AlbumArtist', 'Album', 'Disc', 'Track', 'Artist', 'Title']
-    : ['SourceFile', 'AlbumArtist', 'Album', 'Track', 'Artist', 'Title'];
+    ? ['AlbumArtist', 'Album', 'Disc', 'Track', 'Artist', 'Title']
+    : ['AlbumArtist', 'Album', 'Track', 'Artist', 'Title'];
 }
 
-/** One track as display cells, in the same order as {@link columnNames}. */
-export function trackCells(track: TrackMeta, hasDisc: boolean): string[] {
-  const cells = [track.source, track.albumArtist, track.album];
+/** One track as display cells, in the same order as {@link editableColumns}. */
+export function editableCells(track: TrackMeta, hasDisc: boolean): string[] {
+  const cells = [track.albumArtist, track.album];
   if (hasDisc) cells.push(String(track.disc));
   cells.push(String(track.track), track.artist, track.title);
   return cells;
+}
+
+/**
+ * Columns of the editor table. Rows are matched back by `Id`, their 1-based
+ * position in the list as rendered. The source path is deliberately not in the
+ * table: as the matching key, a find-and-replace over the whole file rejected
+ * every row, because archive filenames usually repeat the album and title text
+ * being corrected.
+ */
+export function columnNames(hasDisc: boolean): string[] {
+  return ['Id', ...editableColumns(hasDisc)];
 }
 
 function header(hasDisc: boolean): string {
@@ -31,9 +43,8 @@ function header(hasDisc: boolean): string {
     '# music-inbox: correct anything that is wrong, then save and exit.',
     '# Columns are tab-separated. Lines starting with # are ignored.',
     '#',
-    '# The first column is the file inside the archive. Leave it alone: it is how',
-    '# your edits are matched back to the files. Delete a whole line to skip that',
-    '# track and leave it out of the library.',
+    '# Id ties each row to its file: leave it alone. Rows can be reordered.',
+    '# Delete a whole line to skip that track and leave it out of the library.',
     '#',
     `# ${columnNames(hasDisc).join('\t')}`,
     '',
@@ -41,8 +52,8 @@ function header(hasDisc: boolean): string {
 }
 
 export function renderTsv(tracks: readonly TrackMeta[], hasDisc: boolean): string {
-  const rows = tracks.map((t) =>
-    trackCells(t, hasDisc)
+  const rows = tracks.map((t, i) =>
+    [String(i + 1), ...editableCells(t, hasDisc)]
       // A stray tab inside a value would silently add a column.
       .map((cell) => cell.replace(/\t/g, ' '))
       .join('\t'),
@@ -55,11 +66,10 @@ export function parseTsv(
   original: readonly TrackMeta[],
   hasDisc: boolean,
 ): ParseResult {
-  const bySource = new Map(original.map((t) => [t.source, t]));
   const expected = columnNames(hasDisc).length;
   const tracks: TrackMeta[] = [];
   const errors: string[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<number>();
 
   const lines = text.split('\n');
   for (const [i, line] of lines.entries()) {
@@ -71,14 +81,17 @@ export function parseTsv(
       errors.push(`line ${lineNo}: expected ${expected} tab-separated columns, found ${cells.length}`);
       continue;
     }
-    const source = cells[0]!.trim();
-    const base = bySource.get(source);
+    const idText = cells[0]!.trim();
+    const id = /^\d+$/.test(idText) ? Number(idText) : NaN;
+    const base = original[id - 1];
     if (!base) {
-      errors.push(`line ${lineNo}: "${source}" is not a file in this archive (column 1 must not be edited)`);
+      errors.push(
+        `line ${lineNo}: "${idText}" is not an Id from this list (the Id column must not be edited)`,
+      );
       continue;
     }
-    if (seen.has(source)) {
-      errors.push(`line ${lineNo}: "${source}" appears more than once`);
+    if (seen.has(id)) {
+      errors.push(`line ${lineNo}: Id ${id} appears more than once`);
       continue;
     }
 
@@ -94,9 +107,9 @@ export function parseTsv(
       continue;
     }
 
-    seen.add(source);
+    seen.add(id);
     tracks.push({
-      source,
+      source: base.source,
       albumArtist: cells[1]!.trim(),
       album: cells[2]!.trim(),
       disc,
@@ -106,7 +119,7 @@ export function parseTsv(
     });
   }
 
-  const skipped = original.map((t) => t.source).filter((s) => !seen.has(s));
+  const skipped = original.filter((_, i) => !seen.has(i + 1)).map((t) => t.source);
   return { tracks, skipped, errors };
 }
 
@@ -121,17 +134,22 @@ function editorCommand(): string {
  */
 export async function openInEditor(file: string): Promise<void> {
   const command = editorCommand();
-  await withStdinReleased(
-    () =>
-      new Promise<void>((resolve, reject) => {
-        const child = spawn('sh', ['-c', `${command} "$1"`, 'sh', file], { stdio: 'inherit' });
-        child.on('error', reject);
-        child.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(`${command} exited with status ${code ?? 'unknown'}`));
-        });
-      }),
+  const { code, signal } = await withStdinReleased(() =>
+    deferInterrupts(
+      () =>
+        new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+          const child = spawn('sh', ['-c', `${command} "$1"`, 'sh', file], { stdio: 'inherit' });
+          child.on('error', reject);
+          child.on('close', (code, signal) => resolve({ code, signal }));
+        }),
+    ),
   );
+  // The editor did not catch Ctrl-C and died of it (130 when sh reports it):
+  // the user meant to stop the run, not to fail this archive and carry on.
+  if (signal === 'SIGINT' || code === 130) interrupt('SIGINT');
+  if (code !== 0) {
+    throw new Error(`${command} exited with ${signal ? `signal ${signal}` : `status ${code}`}`);
+  }
 }
 
 /**
@@ -143,9 +161,8 @@ export async function reviewInEditor(
   tracks: readonly TrackMeta[],
   hasDisc: boolean,
 ): Promise<ParseResult> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'music-inbox-edit-'));
-  const file = path.join(dir, 'tracks.tsv');
-  try {
+  return withTempDir('music-inbox-edit-', async (dir) => {
+    const file = path.join(dir, 'tracks.tsv');
     let body = renderTsv(tracks, hasDisc);
     for (;;) {
       await fs.writeFile(file, body, 'utf8');
@@ -156,9 +173,7 @@ export async function reviewInEditor(
       const complaints = result.errors.map((e) => `# !! ${e}`).join('\n');
       body = `# Could not read your edits. Fix these and save again:\n${complaints}\n#\n${stripComplaints(edited)}`;
     }
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
-  }
+  });
 }
 
 function stripComplaints(text: string): string {

@@ -255,11 +255,15 @@ function cliInteract(
   cwd: string,
   input: string,
   env: NodeJS.ProcessEnv = {},
+  // Its own process group, so `kill 0` in a fake editor reaches the CLI (as
+  // Ctrl-C reaches the whole foreground group) but not the test runner.
+  detached = false,
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', tsx, cli, ...args], {
       cwd,
       env: { ...process.env, NO_COLOR: '1', ...env },
+      detached,
     });
     let stdout = '';
     let stderr = '';
@@ -336,7 +340,7 @@ test('deleting a row in $EDITOR leaves that track out', async () => {
     ]);
 
     const { code, stdout } = await cliInteract([archive, '--target', target], dir, 'e\nc\nn\n', {
-      EDITOR: 'sed -i /02.mp3/d',
+      EDITOR: "sed -i '/Music Is Math/d'",
       VISUAL: '',
     });
 
@@ -345,6 +349,81 @@ test('deleting a row in $EDITOR leaves that track out', async () => {
     assert.deepEqual(await tree(target), [
       path.join('Boards of Canada', 'Geogaddi', '01-Ready Lets Go.mp3'),
     ]);
+  });
+});
+
+/** Leftover temp dirs, with TMPDIR pointed at `tmp` for the run. */
+async function leftovers(tmp: string): Promise<string[]> {
+  return (await fs.readdir(tmp)).filter((name) => name.startsWith('music-inbox-'));
+}
+
+test('Ctrl-C that kills the editor stops the run and removes every temp dir', async () => {
+  await withDir(async (dir) => {
+    const archive = path.join(dir, 'Geogaddi.zip');
+    const target = path.join(dir, 'library');
+    const tmp = path.join(dir, 'tmp');
+    await fs.mkdir(tmp);
+    await writeZip(archive, [{ name: '01.mp3', data: tracks().one }]);
+
+    // The editor signals its whole group, then dies of it, like `code --wait`.
+    const { code } = await cliInteract(
+      [archive, '--target', target],
+      dir,
+      'e\nc\nn\n',
+      { EDITOR: 'kill -INT 0; true', VISUAL: '', TMPDIR: tmp },
+      true,
+    );
+
+    assert.equal(code, 130);
+    assert.deepEqual(await leftovers(tmp), []);
+    assert.deepEqual(await tree(target), []);
+    await fs.access(archive);
+  });
+});
+
+test('Ctrl-C caught by the editor leaves the run going', async () => {
+  await withDir(async (dir) => {
+    const archive = path.join(dir, 'Geogaddi.zip');
+    const target = path.join(dir, 'library');
+    const tmp = path.join(dir, 'tmp');
+    await fs.mkdir(tmp);
+    await writeZip(archive, [{ name: '01.mp3', data: tracks().one }]);
+
+    // Like vim or emacs: the editor shrugs off SIGINT and the user carries on.
+    const { code, stdout } = await cliInteract(
+      [archive, '--target', target],
+      dir,
+      'e\nc\nn\n',
+      { EDITOR: "trap '' INT; kill -INT 0; sed -i s/Ready/Steady/", VISUAL: '', TMPDIR: tmp },
+      true,
+    );
+
+    assert.equal(code, 0, stdout);
+    assert.deepEqual(await tree(target), [
+      path.join('Boards of Canada', 'Geogaddi', '01-Steady Lets Go.mp3'),
+    ]);
+    assert.deepEqual(await leftovers(tmp), []);
+  });
+});
+
+test('SIGTERM while the editor is open removes every temp dir', async () => {
+  await withDir(async (dir) => {
+    const archive = path.join(dir, 'Geogaddi.zip');
+    const target = path.join(dir, 'library');
+    const tmp = path.join(dir, 'tmp');
+    await fs.mkdir(tmp);
+    await writeZip(archive, [{ name: '01.mp3', data: tracks().one }]);
+
+    // $PPID of the `sh -c` running the editor is the CLI itself.
+    const { code } = await cliInteract([archive, '--target', target], dir, 'e\nc\nn\n', {
+      EDITOR: 'kill -TERM $PPID; sleep 1; true',
+      VISUAL: '',
+      TMPDIR: tmp,
+    });
+
+    assert.equal(code, 143);
+    assert.deepEqual(await leftovers(tmp), []);
+    assert.deepEqual(await tree(target), []);
   });
 });
 

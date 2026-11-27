@@ -41,6 +41,15 @@ function session(): readline.Interface {
   rl.on('line', (line: string) => {
     if (!deliver(line)) queued.push(line);
   });
+  // On a TTY, readline holds the terminal in raw mode from here until it
+  // closes, so Ctrl-C arrives as a keypress, not a signal -- even while we
+  // are busy extracting or copying. Unhandled, readline just closes, which
+  // reads as end of input at the next prompt. Raise the real signal instead.
+  rl.on('SIGINT', () => {
+    // Raw mode does not echo ^C; end the prompt line so the shell's is clean.
+    process.stdout.write('\n');
+    process.kill(process.pid, 'SIGINT');
+  });
   rl.once('close', () => {
     closed = true;
     deliver(EOF);

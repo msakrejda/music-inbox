@@ -1,9 +1,6 @@
 /** One MP3 from an archive, with the metadata we will file it under. */
 export interface TrackMeta {
-  /**
-   * Path of the file relative to the archive root. This is the stable key that
-   * survives an $EDITOR round-trip, so it is never edited by the user.
-   */
+  /** Path of the file relative to the archive root. Never edited by the user. */
   source: string;
   albumArtist: string;
   album: string;
